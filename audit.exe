@@ -1,0 +1,611 @@
+*     `  ï»¿# Set the execution policy to allow script to run for the current user
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Unrestricted -Force
+
+
+function AuditLaptopInfo {
+    param (
+        [string]$endUserEmail,
+        [string]$jobNumber,
+        [string]$userCountry,
+        [string]$deviceType,
+        [string]$inventoryType,
+        [string]$belonging,
+        [string]$location,
+        [string]$Company1,
+        [string]$AuditorfullName
+     
+
+
+    )
+
+
+
+    $endUserEmail = $recipientEmail
+
+ 
+# Get the current date and time in a specific format
+$dateTimeFormatted = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+
+# Generate unique asset ID using the country code and current timestamp including milliseconds
+$uniqueAssetID = "$userCountry" + [string](Get-Date -Format "yyyyMMddHHmmssfff")
+
+# Create a unique ID for the data record, including milliseconds
+$uniqueRecordID = [string](Get-Date -Format "yyyyMMddHHmmssfff")
+
+
+
+    # Extract Computer Model
+    $laptopModel = Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object -ExpandProperty Model
+    if ([string]::IsNullOrWhiteSpace($laptopModel)) {
+        $laptopModel = Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty Model
+    }
+    if ([string]::IsNullOrWhiteSpace($laptopModel)) {
+        $laptopModel = "Model unavailable"
+    }
+
+    # Get the Manufacturer and Model information
+
+    $systemInfo = Get-WmiObject -Class Win32_ComputerSystem | Select-Object Manufacturer, Model
+
+
+
+    # Check if the system is a VM based on known virtualization manufacturers or models
+
+    if ($systemInfo.Manufacturer -match "VMware|Microsoft Corporation|Xen|KVM" -or
+
+        $systemInfo.Model -match "VirtualBox|VMware|Virtual Machine|Parallels|KVM|QEMU"){
+
+
+
+        # If it matches, set the status to "VM"
+
+        $VMStatus = "VM"
+
+    }
+
+    else{
+
+        # If it doesn't match, set the status to "Not VM"
+
+        $VMStatus = "Not VM"
+
+    }
+
+    # Extract RAM Information (Total Physical Memory)
+    $ram = Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty TotalPhysicalMemory
+    $ramGB = [string][math]::round($ram / 1GB, 2)  # Convert to GB
+
+   $totalSize = 0
+Get-PhysicalDisk | Where-Object { $_.MediaType -eq 'HDD' -or $_.MediaType -eq 'SSD' } | ForEach-Object { 
+    $hardDiskGB = [math]::Round($_.Size / 1GB, 2)
+    $totalSize += $hardDiskGB
+    
+}
+
+$hardDiskInfo = Get-PhysicalDisk | Select-Object DeviceID, FriendlyName, OperationalStatus, Size, SerialNumber
+
+
+
+
+     # Get information about physical disks
+    $disks = Get-PhysicalDisk
+    $formattedDisks = foreach ($disk in $disks) {
+        $diskOutput = "Device ID: $($disk.DeviceID), Media Type: $($disk.MediaType)"
+        $diskOutput
+    }
+    $DiskData = $formattedDisks -join "`n"
+
+
+    # Extract Processor Information
+    $processor = Get-WmiObject -Class Win32_Processor | Select-Object -ExpandProperty Name  
+
+
+    # Extract Generation (from Processor)
+    $genRegex = [regex]::match($processor, '(\d+)\w+ Gen')
+    if ($genRegex.Success) {
+        $generation = $genRegex.Groups[1].Value
+    } else {
+        $generation = "Unknown"
+    }
+
+    # Extract MAC Address with Connection Name and Network Adapter
+    $networkAdapters = Get-WmiObject -Class Win32_NetworkAdapterConfiguration | Where-Object { $_.MACAddress -ne $null }
+    $formattedData = foreach ($adapter in $networkAdapters) {
+        $connectionName = Get-NetAdapter -IncludeHidden | Where-Object { $_.MacAddress -eq $adapter.MACAddress } | Select-Object -ExpandProperty Name
+        $output = "Network Adapter: $($adapter.Description), MAC Address: $($adapter.MACAddress)"
+        $output
+    }
+    $macAddresses = $formattedData -join "`n"
+
+    # Extract Date when Laptop was First Used (Installation Date)
+    $os = Get-WmiObject -Class Win32_OperatingSystem
+    $installDate = $os.InstallDate
+    $installDateFormatted = [System.Management.ManagementDateTimeConverter]::ToDateTime($installDate)
+
+
+    # Extract Serial Number
+    $serialNumber = Get-WmiObject -Class Win32_BIOS | Select-Object -ExpandProperty SerialNumber
+
+    # If the BIOS serial number is not available or equals "Default string", get the physical disk serial number
+    if ($serialNumber -eq "Default string") {
+        $serialNumber = Get-PhysicalDisk | Select-Object -First 1 -ExpandProperty SerialNumber
+    }
+
+# Graphics Card (DISPCARD)
+$graphicsCard = (Get-WmiObject -Class Win32_VideoController).Name
+
+# LAN Adapter (LANADPT)
+$lanAdapter = (Get-WmiObject -Class Win32_NetworkAdapter | Where-Object { $_.AdapterType -eq 'Ethernet 802.3' }).Name 
+
+# Product ID (Windows Product ID)
+$productID = (Get-WmiObject -Class Win32_OperatingSystem).SerialNumber  
+
+    
+# Hard-coded main category
+$endUserCategory = "Computer"
+
+# Get the current hostname
+$hostName = (Get-WmiObject Win32_ComputerSystem).Name
+
+  
+
+    # Extract Wi-Fi SSID
+    $wifiSsid = netsh wlan show interfaces | Select-String "SSID" | ForEach-Object { ($_ -split ":")[1].Trim() }
+
+    # Extract OS Type and Version
+    $osType = (Get-WmiObject -Class Win32_OperatingSystem).Caption
+    $osVersion = (Get-WmiObject -Class Win32_OperatingSystem).Version
+
+    # Check if the OS is Genuine or Cracked (Activation Status)
+    $osActivationStatus = (Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Name -like "*Windows*" -and $_.PartialProductKey }) | Select-Object -ExpandProperty LicenseStatus
+    $osGenuineStatus = if ($osActivationStatus -eq 1) { "Genuine" } else { "Not Genuine (Cracked)" }
+
+    # Get Wi-Fi MAC ID
+    $wifiAdapter = Get-NetAdapter | Where-Object {$_.Name -like "*Wi-Fi*"}
+    $wifiMacAddress = $wifiAdapter.MacAddress
+
+    # Try to get the laptop brand using Get-CimInstance
+    $laptopBrand = Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object -ExpandProperty Manufacturer
+    if ([string]::IsNullOrWhiteSpace($laptopBrand)) {
+        $laptopBrand = Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty Manufacturer
+    }
+    if ([string]::IsNullOrWhiteSpace($laptopBrand)) {
+        $laptopBrand = "Brand unavailable"
+    }
+
+   
+
+
+    # Output the collected data
+    $info = @{
+        "Record Id" = $uniqueRecordID
+        "Asset ID" = $uniqueAssetID
+        "Audited Date & Time" = $dateTimeFormatted
+        "Computer Model" = $laptopModel
+        "RAM (GB)" = $ramGB
+        "Hard Disk (GB)" = $hardDiskGB
+        "Processor" = $processor
+        "Generation" = $generation
+        "Install Date" = $installDateFormatted
+        "Serial Number" = $serialNumber
+        "GraphicsCard"  = $graphicsCard 
+        "LanAdapter"    =$lanAdapter
+        "ProductID"     =$productID
+        "Wi-Fi SSID" = $wifiSsid
+        "OS Type" = $osType
+        "OS Version" = $osVersion
+        "OS Genuine Status" = $osGenuineStatus
+        "Wi-Fi Mac Address" = $wifiMacAddress
+        "Laptop Brand" = $laptopBrand
+        "MAC Addresses" = $macAddresses
+        "Disk Info" = $DiskData
+        "VM State" = $VMStatus
+        "hostName"   = $hostName
+        "Company"    = $Company1
+        "hardDiskInfo" = $hardDiskInfo
+    }
+
+    # Display the information
+    #$info | Format-Table -AutoSize  
+
+# Get the current date and time in a specific format, including milliseconds
+$dateTimeFormatted = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+
+# Create a Unique Asset ID, including milliseconds
+$uniqueRecordID = "$userCountry" + [string](Get-Date -Format "yyyyMMddHHmmssfff") 
+
+
+# Generate the new hostname using the retrieved employeeCountry and device serial number
+$userCountry = "$userCountry"
+$uniqueAssetID = "$userCountry-$serialNumber"
+
+
+
+
+    #-------------------------------UPDATE SQL------------------------------#
+
+    # Define connection string
+    $sqlconnection=New-Object System.Data.SqlClient.SqlConnection
+    $sqlconnection.ConnectionString="Server=xxx.xxx.xxx.xxx,port no\xxx;Database=Databae name;User=XXX_new;Password=New pass";
+
+    # Build SQL Insert query
+    $sqlInsertQuery = @"
+    INSERT INTO LaptopAudit 
+    (RecordId, AuditedDateTime, ComputerModel, RAM_GB, HardDisk_GB, ProcessorType, GenerationType, InstallDate, SerialNumberInfo, GraphicsCard, LanAdapter, ProductID, WifiSSIDInfo, OSTypeInfo, OSVersionInfo, OSGenuineStatusInfo, WifiMacAddressInfo, LaptopBrandInfo, MACAddressesInfo, DiskInfo, UserEmail, AssetId, employeeJobNumber, employeeCountry, endUserSubCategory, endUserInventoryType, endUserbelonging, endUserLocation, vmStatus, hostName,  endUserCategory, Company, hardDiskInfo, AuditedBy)
+    VALUES
+    ('$uniqueRecordID', '$dateTimeFormatted', '$laptopModel', '$ramGB', '$hardDiskGB', '$processor', '$generation', '$installDateFormatted', '$serialNumber', '$graphicsCard', '$lanAdapter', '$productID', '$wifiSsid', '$osType', '$osVersion', '$osGenuineStatus', '$wifiMacAddress', '$laptopBrand', '$macAddresses', '$DiskData', '$recipientEmail', '$uniqueAssetID', '$jobNumber', '$userCountry', '$deviceType', '$inventoryType', '$belonging', '$location', '$VMStatus','$hostName' , 'Computer', '$Company1','$hardDiskInfo','$AuditorfullName');
+"@
+
+    # Open SQL connection
+    $sqlconnection.Open()
+
+    # Create SQL command
+    $sqlCommand = $sqlconnection.CreateCommand()
+    $sqlCommand.CommandText = $sqlInsertQuery
+
+    # Execute SQL command
+    try {
+        $sqlCommand.ExecuteNonQuery() | Out-Null
+        #Write-Host "Insert successful."
+        Write-Host "`nData recorded successfully! Wait till the system exit's automatically!"
+        Start-Sleep -Seconds 20
+        Write-Host -ForegroundColor GREEN "`n`nTHANK YOU! SYSTEM EXITING......"
+    } catch {
+        Write-Host "Error occurred during insert: $_"
+        Start-Sleep -Seconds 120
+        Write-Host "Error System is exiting."
+    } finally {
+        # Close SQL connection
+        $sqlconnection.Close()
+    }
+}
+
+
+
+
+function Get-ValidatedUserInput {
+
+    # Loop until the user provides valid inputs for all fields
+    do {
+        # Ask for Job Number and validate it with regex
+        do {
+            $jobNumber = Read-Host "`nEnter the Job Number (e.g., WB123456 or 123456)"
+            if ($jobNumber -match "^(WB[0-9]{6,8})$|^([0-9]{6})$") {
+                #Write-Host "Valid Job Number entered."
+            } else {
+                Write-Host -ForegroundColor Red "ERROR: INVALID JOB NUMBER. PLEASE ENTER A VALID JOB NUMBER FORMAT."
+                Write-Output ""  # Outputs a blank line
+            }
+        } while (-not ($jobNumber -match "^(WB[0-9]{6,8})$|^([0-9]{6})$"))
+
+        # Ask for Country and validate it, convert to uppercase
+        do {
+            $country = Read-Host "`nEnter the Country (LK, PK, NP, BD, MM)"
+            $country = $country.ToUpper()
+            if ($country -in @('LK', 'PK', 'NP', 'BD', 'MM')) {
+                #Write-Host "Valid Country entered."
+            } else {
+                Write-Host -ForegroundColor Red "ERROR: INVALID CONTRY. PLEASE ENTER A VALID COUNTRY CODE."
+                Write-Output ""  # Outputs a blank line
+
+            }
+        } while (-not ($country -in @('LK', 'PK', 'NP', 'BD', 'MM')))
+
+
+
+
+       # Ask if it is a Laptop, Desktop, Server, or Mini PC and validate input (accept both uppercase and lowercase)
+do {
+    $deviceType = Read-Host "`nIs this a Laptop/Desktop/Server/Mini PC? Enter 'L' for Laptop, 'D' for Desktop, 'S' for Server, or 'M' for Mini PC"
+    $deviceType = $deviceType.ToUpper()
+    if ($deviceType -in @('L', 'D', 'S', 'M')) {
+        switch ($deviceType) {
+            'L' { $deviceType = "LAPTOP" }
+            'D' { $deviceType = "DESKTOP" }
+            'S' { $deviceType = "SERVER" }
+            'M' { $deviceType = "MINI PC" }
+        }
+        break
+    } else {
+        Write-Host -ForegroundColor Red "ERROR: INVALID DEVICE TYPE. Please enter 'L' for LAPTOP, 'D' for DESKTOP, 'S' for SERVER, or 'M' for MINI PC."
+        Write-Output ""  # Outputs a blank line
+    }
+} while ($true)
+
+
+
+
+        # Ask if it is in use or from IT inventory and validate input (accept both uppercase and lowercase)
+        do {
+            $inventoryType = Read-Host "`nIs this device currently in Use? or from the IT store? Enter 'IU' for In Use or 'IS' for IT Store"
+            $inventoryType = $inventoryType.ToUpper()
+            if ($inventoryType -in @('IU', 'IS')) {
+                if ($inventoryType -eq 'IU') {
+                    $inventoryType = "In Use - Assigned to Employee"
+                } elseif ($inventoryType -eq 'IS') {
+                    $inventoryType = "In Store - Not Assigned"
+                }
+                #Write-Host "Valid Inventory Type entered: $inventoryType."
+                break
+            } else {
+                Write-Host -ForegroundColor Red "ERROR: INVALID INVENTRY TYPE. PLEASE ENTER 'IU' for In Use, 'IS' for IT Inventory, or 'B' for Broken."
+                Write-Output ""  # Outputs a blank line
+
+            }
+        } while (-not ($deviceType -in @('IU', 'IS')))
+
+       # Ask for the user's belonging (Headquarters, Sort Center, Warehouse, Hub, Customer Care, or Commercial Office)
+do {
+    $belonging = Read-Host "`nDo you belong to Headquarters, Sort Center, Warehouse, Hub, Customer Care, or Commercial Office? Enter 'HQ' for Headquarters, 'S' for Sort Center, 'W' for Warehouse, 'H' for Hub, 'C' for Customer Care, or 'CO' for Commercial Office"
+    $belonging = $belonging.ToUpper()
+    if ($belonging -in @('HQ', 'S', 'W', 'H', 'C', 'CO')) {
+        switch ($belonging) {
+            'HQ' { $belonging = "Headquarters" }
+            'S' { $belonging = "Sort Center" }
+            'W' { $belonging = "Warehouse" }
+            'H' { $belonging = "Hub" }
+            'C' { $belonging = "Customer Care" }
+            'CO' { $belonging = "Commercial Office" }
+        }
+        break
+    } else {
+        Write-Host -ForegroundColor Red "ERROR: INVALID SELECTION. Please enter 'HQ' for Headquarters, 'S' for Sort Center, 'W' for Warehouse, 'H' for Hub, 'C' for Customer Care, or 'CO' for Commercial Office."
+        Write-Output ""  # Outputs a blank line
+    }
+} while ($true)
+
+
+        # Ask for the specific location based on the previous answer
+        $location = Read-Host "`nWhich $belonging office location do you belong to?"
+
+         # Define the list of companies
+$CompanyList = @(
+    "1) Sister Company1",
+    "2) Sister Company2",
+    "3) Sister Company3",
+    "4) Sister Company4",
+    "5) Sister Company5"
+)
+
+# Display the company list
+Write-Host ""
+Write-Host "Select the Company by number:"
+$CompanyList | ForEach-Object { Write-Host $_ }
+
+# Start loop to keep asking for valid input
+do {
+    $mainSelection = Read-Host "ENTER THE NUMBER CORRESPONDING TO THE COMPANY"
+    
+    # Validate input to ensure it is a number between 1 and 5
+    if ($mainSelection -match "^[1-5]$") {
+        # Remove the numbering part and store the company name directly in the $Company variable
+        $Company1 = $CompanyList[$mainSelection - 1] -replace '^\d+\) ', ''
+        
+        break
+    } else {
+        Write-Host -ForegroundColor Red "ERROR: INVALID SELECTION. PLEASE ENTER A NUMBER BETWEEN 1 TO 5."
+    }
+} while ($true)
+
+
+ # Ask for the Auditor Full Name and format it
+        $AuditorfullName = Read-Host "`nEnter the Full Name of the Auditor"
+        $AuditorfullName = ($AuditorfullName.Split(' ') | ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1).ToLower() }) -join ' '
+        
+
+
+
+
+
+        Write-Host -ForegroundColor Yellow "`nPLEASE WAIT TILL YOUR INFORMATION IS PROCESSED!"
+        # Optionally break the loop after all values are correct if needed
+        $repeat = $false
+    } while ($repeat)
+
+    # Return the collected data as a hashtable
+    [PSCustomObject]@{
+        JobNumber     = $jobNumber
+        Country       = $country
+        DeviceType    = $deviceType
+        InventoryType = $inventoryType
+        Belonging     = $belonging
+        Location      = $location
+        Company       = $Company1
+        AuditorfullName = $AuditorfullName
+       hardDiskInfo   = $hardDiskInfo 
+    }
+
+}
+
+
+# Email configuration for tertiary SMTP server (Gmail Backup)
+$smtpServerTertiary = "smtp.gmail.com"
+$smtpPortTertiary = 587
+$senderEmailTertiary = "aasetauditbackup@gmail.com"  # Ensure this matches the sending email
+$senderPasswordTertiary = "AssetAudit@2003"
+$senderAliasTertiary = "IT Backup"      
+
+# Function to validate email using regex
+function Validate-Email {
+    param (
+        [string]$email
+    )
+    
+    # Regular expression for basic email validation
+    $regex = '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    
+    if ($email -match $regex) {
+        return $true
+    } else {
+        return $false
+    }
+}
+
+# Function to send the verification email
+function Send-VerificationEmail {
+    param (
+        [string]$recipientEmail,
+        [string]$verificationCode,
+        [string]$fullName,
+        [string]$smtpServer,
+        [int]$smtpPort,
+        [string]$senderEmail,
+        [string]$senderPassword,
+        [string]$senderAlias
+    )
+    
+    # Construct the HTML email body with the verification code
+    $emailBody = @"
+    <html>
+        <head>
+            <title>Verification Code for IT Audit</title>
+        </head>
+        <body>
+            <p>Dear $fullName,</p>
+            <p>As part of our ongoing IT audit, we require verification of your email address. Please enter the code below to confirm your identity and complete the process:</p>
+            
+            <h3>Your Verification Code: $verificationCode</h3>
+            
+            <p>If you have any concerns, kindly reach out to host@domain</p>
+            
+            <br />
+            <p>Best Regards,</p>
+            <p>IT LK</p>
+        </body>
+    </html>
+"@
+
+    # Construct the email message
+    $message = New-Object system.net.mail.mailmessage
+    $message.From = New-Object System.Net.Mail.MailAddress($senderEmail, $senderAlias)
+    $message.To.Add($recipientEmail)
+    $message.Subject = "IT Audit | Email Verification"
+    $message.Body = $emailBody
+    $message.IsBodyHtml = $true  # Set to true to send HTML content
+
+    # Set up the SMTP client
+    $smtp = New-Object system.net.mail.smtpclient($smtpServer, $smtpPort)
+    $smtp.EnableSsl = $true
+    $smtp.Credentials = New-Object System.Net.NetworkCredential($senderEmail, $senderPassword)
+
+    try {
+        $smtp.Send($message)
+        Write-Host -ForegroundColor Yellow "Verification email sent to $recipientEmail"
+        return $true
+    } catch {
+        Write-Host "Failed to send email using $smtpServer."
+        return $false
+    }
+}
+
+# Email configuration for secondary SMTP server
+$smtpServerSecondary = "smtp.aliyun.com"
+$smtpPortSecondary = 25
+$senderEmailSecondary = "it.assetaudit@host"
+$senderPasswordSecondary = "iFG&4na7"  # Ideally, do not hardcode this password in your script
+$senderAliasSecondary = "IT Audit"
+
+# Email configuration for primary SMTP server
+$smtpServerPrimary = "smtp.gmail.com"
+$smtpPortPrimary = 587
+$senderEmailPrimary = "it@host"
+$senderPasswordPrimary = "wgzmkmyhffrriskn"  # Ideally, do not hardcode this password in your script
+$senderAliasPrimary = "IT Support"
+
+# Main program loop
+$verified = $false
+$attempts = 0
+$maxAttempts = 3
+$validEmail = $false
+
+while (-not $verified) {
+    while (-not $validEmail -and $attempts -lt $maxAttempts) {
+        # Get the recipient's email address
+        $recipientEmail = (Read-Host "`n`nEnter your office email address").Trim()
+
+        if (Validate-Email -email $recipientEmail) {
+            $validEmail = $true
+
+            # Extract the part before the domain (to generate full name)
+            $fullName = $recipientEmail.Split('@')[0] -replace "\.", " "
+            $fullName = ($fullName -split ' ' | ForEach-Object { 
+                $_.Substring(0,1).ToUpper() + $_.Substring(1).ToLower() 
+            }) -join ' '
+
+            # Generate a random verification code
+            $verificationCode = Get-Random -Minimum 100000 -Maximum 1000000
+
+            # Set expiration time for the verification code (5 minutes)
+            $codeGeneratedTime = Get-Date
+            $codeExpirationTime = $codeGeneratedTime.AddMinutes(5)
+
+            # Try sending the verification email using secondary SMTP server
+            $emailSent = Send-VerificationEmail -recipientEmail $recipientEmail -verificationCode $verificationCode -fullName $fullName -smtpServer $smtpServerSecondary -smtpPort $smtpPortSecondary -senderEmail $senderEmailSecondary -senderPassword $senderPasswordSecondary -senderAlias $senderAliasSecondary
+
+            # If sending failed, use primary SMTP server
+            if (-not $emailSent) {
+                $emailSent = Send-VerificationEmail -recipientEmail $recipientEmail -verificationCode $verificationCode -fullName $fullName -smtpServer $smtpServerPrimary -smtpPort $smtpPortPrimary -senderEmail $senderEmailPrimary -senderPassword $senderPasswordPrimary -senderAlias $senderAliasPrimary
+            }
+
+            # If both failed, use tertiary SMTP server
+            if (-not $emailSent) {
+                $emailSent = Send-VerificationEmail -recipientEmail $recipientEmail -verificationCode $verificationCode -fullName $fullName -smtpServer $smtpServerTertiary -smtpPort $smtpPortTertiary -senderEmail $senderEmailTertiary -senderPassword $senderPasswordTertiary -senderAlias $senderAliasTertiary
+            }
+
+            if ($emailSent) {
+                $codeValid = $false
+                while (-not $codeValid) {
+                    # Ask the user to enter the verification code
+                    $userCode = Read-Host "`nEnter the verification code sent to your email"
+                    Write-Output ""  # Outputs a blank line
+
+                    # Get the current time and check if the code has expired
+                    $currentTime = Get-Date
+
+                    if ($currentTime -le $codeExpirationTime) {
+                        if ($userCode -eq $verificationCode) {
+                            Write-Host -ForegroundColor GREEN "EMAIL VERIFICATION SUCCESSFUL. PROCEEDING..."
+                            $verified = $true
+                            $codeValid = $true
+
+                            # Now, collect additional information (for auditing)
+                            $userInputs = Get-ValidatedUserInput
+
+                            # Call the AuditLaptopInfo function with the validated user inputs
+                            AuditLaptopInfo -jobNumber $userInputs.JobNumber `
+                                             -userCountry $userInputs.Country `
+                                             -deviceType $userInputs.DeviceType `
+                                             -inventoryType $userInputs.InventoryType `
+                                             -belonging $userInputs.Belonging `
+                                             -location $userInputs.Location `
+                                             -Company1 $userInputs.Company `
+                                             -AuditorfullName $userInputs.AuditorfullName
+                        } else {
+                            Write-Host -ForegroundColor Red "INCORRECT CODE. TRY AGAIN."
+                            Write-Output ""  # Outputs a blank line
+                        }
+                    } else {
+                        Write-Host "Verification code has expired. Please try again."
+                        break
+                    }
+                }
+            } else {
+                Write-Host -ForegroundColor Red "Error in sending email. Please check your SMTP settings."
+                break
+            }
+
+        } else {
+            $attempts++
+            if ($attempts -lt $maxAttempts) {
+                Write-Host -ForegroundColor Red "ERROR: INVALID EMAIL ADDRESS. PLEASE TRY AGAIN. ATTEMPTS REMAINING: $($maxAttempts - $attempts)"
+            } else {
+                Write-Host -ForegroundColor Red "ERROR: ATTEMPTS REACHED. EXITING..."
+            }
+        }
+    }
+
+    # Exit if the email is not valid
+    if (-not $validEmail) {
+        break
+    }
+}
